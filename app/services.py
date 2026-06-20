@@ -4,8 +4,8 @@ import asyncio
 import json
 import logging
 
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+from google import genai
+from google.genai import types
 
 from app.config import settings
 from app.models import (
@@ -18,20 +18,18 @@ from app.models import (
 
 logger = logging.getLogger(__name__)
 
-genai.configure(api_key=settings.GEMINI_API_KEY)
+# New SDK uses a Client object that holds the API key
+client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 
 def build_prompt(request: HarvestRequest) -> str:
-    """Build Gemini prompt with full campaign context and per-term metrics."""
-
+    """Build the analysis prompt with campaign context and decision guidelines."""
     search_term_sections = []
     for i, term in enumerate(request.search_terms, 1):
         m = term.metrics
 
         acos_display = (
-            f"{m.acos:.2f}%"
-            if m.acos is not None
-            else "N/A (no sales yet)"
+            f"{m.acos:.2f}%" if m.acos is not None else "N/A (no sales yet)"
         )
         current_bid_display = (
             f"${m.current_bid:.2f}"
@@ -78,145 +76,68 @@ Sponsored Products bid management and keyword harvesting strategies.
 Your task is to analyze each search term's performance data and return
 exactly one optimization action per search term.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CAMPAIGN INFORMATION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Campaign      : {request.campaign_name} (ID: {request.campaign_id})
 Business      : {request.business_context}
 Target ACoS   : {request.user_constraints.target_acos}%
 Max Bid       : ${request.user_constraints.max_bid:.2f}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FIELD DEFINITIONS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Search Term     : The actual query the customer typed into Amazon search.
-                  This is the text used for add_negative_keyword actions.
-
+Search Term     : The actual query the customer typed. Used for add_negative_keyword.
 Target Text     : The keyword or auto-target expression you are bidding on.
-                  For EXACT/PHRASE/BROAD match: this is the keyword.
-                  For TARGETING_EXPRESSION / TARGETING_EXPRESSION_PREDEFINED:
-                  this is an auto-target group (close-match, loose-match, etc.)
-                  The search term may DIFFER from the target text — especially
-                  in broad/auto campaigns.
-
-Match Type      : How loosely the target matches customer queries.
-                  EXACT = very tight match.
-                  BROAD / TARGETING_EXPRESSION / TARGETING_EXPRESSION_PREDEFINED
-                  = wider matching, more likely to surface irrelevant queries.
-                  For BROAD/AUTO match types, adding a negative keyword blocks
-                  only this specific query — it does NOT disable the whole target.
-
+Match Type      : EXACT/PHRASE = tight match. BROAD/TARGETING_EXPRESSION/
+                  TARGETING_EXPRESSION_PREDEFINED = wider matching.
 Target Type     : keyword / auto / product
-                  This tells you what TYPE of Amazon targeting is in use.
+Current Bid     : "N/A" means auto-target with default bid — use observed CPC as anchor.
+ACoS            : (Spend/Sales)*100. null means zero sales. Primary decision metric.
+Revenue/Click   : Sales/Clicks. High value vs CPC = increase_bid signal.
 
-Current Bid     : The explicit bid set on this target.
-                  "N/A" means it is an auto-target with Amazon's default bid —
-                  in this case use the observed CPC as the bid anchor
-                  when recommending a starting bid.
-
-ACoS            : (Spend / Sales) × 100. null means zero sales so far.
-                  This is your PRIMARY decision metric.
-                  Compare against Target ACoS of {request.user_constraints.target_acos}%.
-
-Revenue/Click   : Sales ÷ Clicks. A high Revenue/Click relative to CPC
-                  is a strong signal to increase bid and capture more volume.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SEARCH TERM PERFORMANCE DATA
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {search_terms_block}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DECISION FRAMEWORK
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ACTION 1 — increase_bid
-  When to use:
-  • ACoS is significantly below target ACoS (strong performer)
-  • Conversion rate is healthy (> 0 orders)
-  • Revenue/Click is high relative to CPC
-  • Sufficient data (clicks >= 10 preferred)
-  Bid math: new bid = current_bid × 1.10 to 1.20 (10–20% increase)
-  If current_bid is N/A: set a starting bid using observed CPC × 1.5,
-  capped at max_bid.
+  ACoS significantly below target, healthy conversion rate, sufficient clicks.
+  Bid math: current_bid × 1.10 to 1.20. If current_bid is N/A, use CPC × 1.5, capped at max_bid.
 
 ACTION 2 — decrease_bid
-  When to use:
-  • ACoS is above target ACoS but sales > 0 (overspending but converting)
-  • NOT zero conversions (that is add_negative_keyword territory)
-  Bid math: new bid = current_bid × 0.70 to 0.90 (10–30% decrease)
+  ACoS above target but sales > 0. Bid math: current_bid × 0.70 to 0.90.
 
 ACTION 3 — add_negative_keyword
-  When to use:
-  • Zero or near-zero sales despite meaningful spend AND clicks >= 10
-  • Search term is semantically IRRELEVANT to the business context
-    (wrong intent: informational, competitor brand, repair, accessory,
-     job-seeking, or completely different product category)
-  • The "Search Term" text (not target text) is what gets negated
-  • For BROAD / AUTO match types: safe to negate the specific query
-    without disabling the whole targeting expression
-  Note: Even if ACoS looks acceptable, add_negative if the search term
-  is semantically irrelevant to the business. A lucky conversion on an
-  irrelevant term does not make the term relevant.
+  Zero/near-zero sales with meaningful spend AND clicks >= 10, OR semantically
+  irrelevant to business context (wrong intent: informational, competitor,
+  repair, accessory, job-seeking, different product category).
 
 ACTION 4 — no_action
-  When to use:
-  • Clicks < 10: insufficient data regardless of metrics
-  • ACoS is near target (within 5 percentage points either way): stable
-  • Data is ambiguous and more monitoring is needed
-  Note: Prefer no_action over a wrong action. Conservative is better
-  than incorrect when money is involved.
+  Clicks < 10: insufficient data regardless of metrics. Prefer no_action over
+  a wrong action when uncertain.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PRIORITY ASSIGNMENT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HIGH   : confidence >= 0.85 AND any of:
-         • ACoS > 2× target_acos with sales > 0
-         • Zero sales with spend > max_bid × 3 and clicks >= 15
-         • ACoS < target_acos × 0.5 with sales > 0
-         • Semantically irrelevant term with high spend
-
+HIGH   : confidence >= 0.85 AND (ACoS > 2x target with sales > 0, OR zero sales
+         with spend > max_bid*3 and clicks >= 15, OR ACoS < target*0.5 with sales > 0,
+         OR semantically irrelevant term with high spend)
 MEDIUM : confidence >= 0.65 and does not meet HIGH criteria
+LOW    : confidence < 0.65, OR clicks < 10, OR no_action cases
 
-LOW    : confidence < 0.65
-         OR clicks < 10 (insufficient data)
-         OR no_action cases
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HARD RULES — NEVER VIOLATE THESE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. NEVER recommend a bid above ${request.user_constraints.max_bid:.2f} (max_bid)
+HARD RULES
+1. NEVER recommend a bid above ${request.user_constraints.max_bid:.2f}
 2. For add_negative_keyword and no_action: omit recommended_bid entirely
-3. Always copy the exact target_id from the input — never modify or invent it
-4. Always copy the exact ad_group_id from the input
-5. Return EXACTLY one action per search term, in the same order as input
-6. When clicks < 10 and you are uncertain: default to no_action
-7. Confidence cap: when clicks < 10, cap confidence at 0.75 regardless
-   of how good the metrics look (small samples carry statistical noise)
-8. Reasoning must reference the actual numbers from the data
-   (e.g. "ACoS 13.3% is below the 25% target" — not generic statements)
+3. Always copy the exact target_id and ad_group_id from the input
+4. Return EXACTLY one action per search term, in the same order as input
+5. When clicks < 10 and uncertain: default to no_action
+6. Confidence cap: when clicks < 10, cap confidence at 0.75
+7. Reasoning must reference the actual numbers from the data
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Return structured JSON with:
-- One action per search term (same count and order as input)
-- A summary paragraph highlighting HIGH priority actions first
-- Specific numbers in every reasoning field
+Return structured JSON with one action per search term and a summary
+highlighting HIGH priority actions first.
 """
     return prompt
 
 
 def build_response_schema() -> dict:
-    """
-    JSON schema enforcing Gemini structured output.
-
-    Rules:
-    - No 'minimum', 'maximum', or 'nullable' — Gemini SDK rejects these
-    - recommended_bid is NOT in required — Gemini omits it for
-      add_negative_keyword and no_action
-    - priority and target_id ARE required for every action
-    """
+    """JSON schema enforcing Gemini structured output."""
     return {
         "type": "object",
         "properties": {
@@ -253,8 +174,6 @@ def build_response_schema() -> dict:
                         "reasoning",
                         "confidence",
                         "priority",
-                        # recommended_bid intentionally excluded —
-                        # Gemini omits it for add_negative_keyword / no_action
                     ],
                 },
             },
@@ -265,69 +184,39 @@ def build_response_schema() -> dict:
 
 
 async def analyze_search_terms(request: HarvestRequest) -> HarvestResponse:
-    """
-    Core service function.
-
-    Flow:
-    1. Build valid_target_ids set for hallucination guard
-    2. Build prompt
-    3. Call Gemini with structured output config
-    4. Parse and validate response
-    5. Return HarvestResponse
-    """
+    """Core service function using the google-genai SDK."""
     logger.info(
         "Analysis started | campaign='%s' | terms=%d",
         request.campaign_name,
         len(request.search_terms),
     )
 
-    # ── Hallucination guard ───────────────────────────────────────
-    # Gemini must echo back a target_id that exists in the input.
-    # If it invents one, we catch it here and return a clean 422
-    # instead of passing bad data downstream to Node.js.
     valid_target_ids = {term.target_id for term in request.search_terms}
 
     try:
-        model = genai.GenerativeModel(model_name=settings.GEMINI_MODEL)
         prompt = build_prompt(request)
-
         logger.debug("Prompt length: %d characters", len(prompt))
 
-        generation_config = GenerationConfig(
-            temperature=settings.GEMINI_TEMPERATURE,
-            # temperature=0.1 → consistent, deterministic decisions
-            # Never use high temperature for financial bid decisions
-
-            response_mime_type="application/json",
-            # Forces Gemini to return raw JSON, not markdown code blocks
-
-            response_schema=build_response_schema(),
-            # Enforces exact structure — Gemini cannot return free text
-
-            max_output_tokens=settings.GEMINI_MAX_TOKENS,
-        )
-
-        # ── Gemini API call with timeout ──────────────────────────
         response = await asyncio.wait_for(
-            model.generate_content_async(
-                prompt,
-                generation_config=generation_config,
+            client.aio.models.generate_content(
+                model=settings.GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=settings.GEMINI_TEMPERATURE,
+                    response_mime_type="application/json",
+                    response_schema=build_response_schema(),
+                    max_output_tokens=settings.GEMINI_MAX_TOKENS,
+                ),
             ),
             timeout=120,
-            # 120s timeout — Gemini cold starts can exceed 60s
-            # especially for large batches of search terms
         )
 
-        # ── Parse response ────────────────────────────────────────
         parsed = json.loads(response.text)
 
-        # ── Build OptimizationAction list ─────────────────────────
         actions = []
         for raw_action in parsed["actions"]:
-
             target_id = raw_action["target_id"]
 
-            # Hallucination check — target_id must match input
             if target_id not in valid_target_ids:
                 raise ValueError(
                     f"Gemini returned unknown target_id '{target_id}' "
@@ -363,7 +252,6 @@ async def analyze_search_terms(request: HarvestRequest) -> HarvestResponse:
             model_used=settings.GEMINI_MODEL,
         )
 
-    # ── Error handling ────────────────────────────────────────────
     except json.JSONDecodeError as exc:
         logger.error("Gemini returned invalid JSON: %s", exc)
         raise ValueError("AI model returned malformed response") from exc
@@ -375,11 +263,9 @@ async def analyze_search_terms(request: HarvestRequest) -> HarvestResponse:
         ) from exc
 
     except ValueError:
-        # Re-raise our own validation errors (target_id mismatch,
-        # bad ActionType/PriorityLevel enum value from Gemini).
-        # main.py maps ValueError → HTTP 422 ai_response_invalid.
         raise
 
     except Exception as exc:
         logger.error("Gemini call failed: %s", exc)
         raise RuntimeError(f"AI analysis failed: {exc}") from exc
+

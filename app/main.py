@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown events."""
     logger.info("Starting %s v%s", settings.APP_NAME, settings.APP_VERSION)
+    logger.info(
+        "Gemini config loaded | model=%s | key_length=%d | key_fingerprint=%s",
+        settings.GEMINI_MODEL,
+        len(settings.GEMINI_API_KEY),
+        settings.gemini_api_key_fingerprint,
+    )
     yield
     logger.info("Shutting down %s", settings.APP_NAME)
 
@@ -96,9 +102,6 @@ async def harvest_search_terms(
                 "message": "An unexpected error occurred",
             },
         )
-
-
-
 
 
 if __name__ == "__main__":

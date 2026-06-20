@@ -35,7 +35,12 @@ def valid_payload():
         "search_terms": [
             {
                 "search_term": "silicone spatula",
+                "target_id": "target-001",
                 "ad_group_id": "ag-001",
+                "target_text": "silicone spatula",
+                "match_type": "EXACT",
+                "target_type": "keyword",
+                "target_status": "enabled",
                 "metrics": {
                     "impressions": 1000,
                     "clicks": 50,
@@ -46,6 +51,8 @@ def valid_payload():
                     "ctr": 5.0,
                     "cpc": 1.5,
                     "conversion_rate": 20.0,
+                    "cost_per_conversion": 7.5,
+                    "revenue_per_click": 6.0,
                     "current_bid": 1.25,
                 },
             }
@@ -63,11 +70,13 @@ def mock_harvest_response():
         actions=[
             OptimizationAction(
                 search_term="silicone spatula",
+                target_id="target-001",
                 ad_group_id="ag-001",
                 action=ActionType.INCREASE_BID,
                 recommended_bid=1.45,
                 reasoning="ACoS is well below target with strong conversion rate.",
                 confidence=0.85,
+                priority="HIGH",
             )
         ],
         summary="One term recommended for bid increase due to strong performance.",

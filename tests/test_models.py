@@ -29,6 +29,8 @@ def _sample_metric(**overrides) -> MetricPayload:
         "ctr": 5.0,
         "cpc": 1.5,
         "conversion_rate": 20.0,
+        "cost_per_conversion": 7.5,
+        "revenue_per_click": 6.0,
         "current_bid": 1.25,
     }
     defaults.update(overrides)
@@ -45,7 +47,12 @@ def _sample_harvest_request(**overrides) -> HarvestRequest:
         "search_terms": [
             SearchTermData(
                 search_term="silicone spatula",
+                target_id="target-001",
                 ad_group_id="ag-001",
+                target_text="silicone spatula",
+                match_type="EXACT",
+                target_type="keyword",
+                target_status="enabled",
                 metrics=_sample_metric(),
             )
         ],
@@ -84,14 +91,23 @@ def test_optimization_action_confidence_out_of_range():
     with pytest.raises(ValidationError):
         OptimizationAction(
             search_term="test term",
+            target_id="target-001",
             ad_group_id="ag-001",
             action="no_action",
             reasoning="Insufficient data",
             confidence=1.5,
+            priority="LOW",
         )
 
 
 def test_metric_payload_acos_none():
     """acos=None should be valid for zero-sales search terms."""
-    metric = _sample_metric(acos=None, sales=0.0, orders=0, conversion_rate=None)
+    metric = _sample_metric(
+        acos=None,
+        sales=0.0,
+        orders=0,
+        conversion_rate=0.0,
+        cost_per_conversion=None,
+        revenue_per_click=0.0,
+    )
     assert metric.acos is None
