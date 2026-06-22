@@ -8,10 +8,10 @@ from pydantic import BaseModel, Field
 
 
 class ActionType(str, Enum):
-    INCREASE_BID = "increase_bid"
-    DECREASE_BID = "decrease_bid"
-    ADD_NEGATIVE = "add_negative_keyword"
-    NO_ACTION    = "no_action"
+    ADD_NEGATIVE_EXACT = "add_negative_exact"
+    ADD_NEGATIVE_PHRASE = "add_negative_phrase"
+    CREATE_EXACT_KEYWORD = "create_exact_keyword"
+    NO_ACTION = "no_action"
 
 
 class PriorityLevel(str, Enum):
@@ -51,7 +51,7 @@ class MetricPayload(BaseModel):
     revenue_per_click: float = Field(
         ..., ge=0,
         description="sales/clicks. 0 if no clicks. "
-                    "Strong increase_bid signal when high vs CPC."
+                    "May indicate strong customer intent."
     )
 
 
@@ -99,11 +99,11 @@ class SearchTermData(BaseModel):
 class UserConstraints(BaseModel):
     target_acos: float = Field(
         ..., gt=0, lt=100,
-        description="Target ACoS %. Primary decision threshold for Gemini."
+        description="Target ACoS %. Node.js uses this for mathematical optimization."
     )
     max_bid: float = Field(
         ..., gt=0,
-        description="Hard bid ceiling. Gemini must never exceed this."
+        description="Hard bid ceiling. Node.js uses this for bid optimization."
     )
 
 
@@ -124,11 +124,6 @@ class OptimizationAction(BaseModel):
     target_id:      str   = Field(..., description="Echoed from input for Node.js API call.")
     ad_group_id:    str
     action:         ActionType
-    recommended_bid: Optional[float] = Field(
-        None,
-        description="Only for increase_bid / decrease_bid. "
-                    "Omit for add_negative_keyword / no_action."
-    )
     reasoning:  str
     confidence: float         = Field(..., ge=0, le=1)
     priority:   PriorityLevel
